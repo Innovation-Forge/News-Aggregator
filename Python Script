@@ -1,0 +1,98 @@
+import feedparser
+import logging
+import sqlite3
+import os
+from datetime import datetime
+import pandas as pd
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Database setup
+conn = sqlite3.connect('aggregator.db')
+c = conn.cursor()
+
+# Create table
+c.execute('''CREATE TABLE IF NOT EXISTS articles 
+             (title TEXT, link TEXT UNIQUE, published DATE)''')
+
+# Function to fetch and parse RSS feeds
+def fetch_rss_feeds(feed_urls):
+    articles = []
+    for url in feed_urls:
+        try:
+            # Parse the RSS feed
+            feed = feedparser.parse(url)
+            if feed.bozo:  # feed.bozo is true when a feed is malformed
+                logging.error(f"Failed to parse feed {url}")
+                continue
+
+            for entry in feed.entries:
+                # For each article, store title, URL, and published date
+                published = datetime(*entry.published_parsed[:6]) if hasattr(entry, 'published_parsed') else None
+                articles.append({
+                    'title': entry.title,
+                    'link': entry.link,
+                    'published': published
+                })
+        except Exception as e:
+            logging.error(f"Error fetching or parsing feed {url}: {e}")
+    return articles
+
+# Function to store articles in the database
+def store_articles(articles):
+    for article in articles:
+        try:
+            with conn:
+                c.execute('''INSERT INTO articles (title, link, published) 
+                             VALUES (?, ?, ?)''', 
+                          (article['title'], article['link'], article['published']))
+        except sqlite3.IntegrityError as e:
+            logging.info(f"Article already exists: {article['title']}")
+
+# Function to print articles from the database
+def print_stored_articles():
+    c.execute('SELECT title, link, published FROM articles')
+    articles = c.fetchall()
+    for article in articles:
+        print(f"Title: {article[0]}")
+        print(f"URL: {article[1]}")
+        print(f"Published Date: {article[2]}\n")
+
+# Function to export articles to an Excel spreadsheet
+def export_to_excel():
+    c.execute('SELECT title, link, published FROM articles')
+    df = pd.DataFrame(c.fetchall(), columns=['Title', 'URL', 'Published'])
+    df.to_excel('aggregated_articles.xlsx', index=False)
+    logging.info('Exported articles to Excel spreadsheet "aggregated_articles.xlsx".')
+
+# Load RSS feed URLs from a file
+def load_feed_urls(file_path):
+    with open(file_path, 'r') as file:
+        return file.read().strip().split('\n')
+
+# Main function
+def main():
+    feeds_file = 'feeds.txt'
+    default_feeds = [
+        'http://feeds.bbci.co.uk/news/rss.xml',
+        'http://rss.cnn.com/rss/edition.rss',
+        'https://www.npr.org/rss/rss.php?id=1001'
+    ]
+    
+    # Check if feeds.txt exists, if not, create it with some default feeds
+    if not os.path.isfile(feeds_file):
+        with open(feeds_file, 'w') as file:
+            for feed in default_feeds:
+                file.write(feed + '\n')
+                logging.info(f"Created {feeds_file} with default feeds.")
+
+    feed_urls = load_feed_urls(feeds_file)  # Load feed URLs from external file
+    articles = fetch_rss_feeds(feed_urls)
+    store_articles(articles)
+    print_stored_articles()
+    export_to_excel()
+    logging.info(f"Stored {len(articles)} new articles.")
+
+if __name__ == "__main__":
+    main()
